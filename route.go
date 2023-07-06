@@ -14,5 +14,6 @@ func InitRouter() *gin.Engine {
 	})
 
 	r.POST("/token", CreateToken)
+	r.GET("/authorize", Authorize)
 	return r
 }

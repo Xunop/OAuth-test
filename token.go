@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -19,11 +20,13 @@ import (
 	"github.com/vgarvardt/go-pg-adapter/pgx4adapter"
 )
 
-func CreateToken(c *gin.Context) {
-	pgxConn, _ := pgx.Connect(context.TODO(), os.Getenv("DB_URI"))
+var (
+	srv        *server.Server
+	pgxConn, _ = pgx.Connect(context.TODO(), os.Getenv("DB_URI"))
+)
 
+func InitServer(c *gin.Context) {
 	manager := manage.NewDefaultManager()
-
 	// use PostgreSQL token store with pgx.Connection adapter
 	adapter := pgx4adapter.NewConn(pgxConn)
 	tokenStore, _ := pg.NewTokenStore(adapter, pg.WithTokenStoreGCInterval(time.Minute))
@@ -33,28 +36,14 @@ func CreateToken(c *gin.Context) {
 	manager.MapTokenStorage(tokenStore)
 	manager.MapClientStorage(clientStore)
 
-	//	username, ok := c.GetPostForm("username");
-	//	if !ok {
-	//		c.JSON(http.StatusBadRequest, gin.H{
-	//			"error": "username is empty",
-	//		})
-	//		return
-	//	}
-	//	password, ok := c.GetPostForm("password");
-	//	if !ok {
-	//		c.JSON(http.StatusBadRequest, gin.H{
-	//			"error": "password is empty",
-	//		})
-	//		return
-	//	}
-	clientID, ok := c.GetPostForm("client_id")
+	clientID, ok := c.GetQuery("client_id")
 	if !ok {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "client_id is empty",
 		})
 		return
 	}
-	clientSecret, ok := c.GetPostForm("client_secret")
+	clientSecret, ok := c.GetQuery("client_secret")
 	if !ok {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "client_secret is empty",
@@ -71,14 +60,47 @@ func CreateToken(c *gin.Context) {
 		log.Println("Internal error: ", cErr)
 	}
 
-	srv := server.NewServer(server.NewConfig(), manager)
+	srv = server.NewServer(server.NewConfig(), manager)
 	srv.SetPasswordAuthorizationHandler(PasswordAuthorizationHandler)
 	srv.SetUserAuthorizationHandler(userAuthorizeHandler)
 	srv.SetClientInfoHandler(server.ClientFormHandler)
+}
+
+func CreateToken(c *gin.Context) {
 	tErr := srv.HandleTokenRequest(c.Writer, c.Request)
 	if tErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": tErr.Error(),
+		})
+		return
+	}
+}
+
+// redirect user to login for authorization
+func Authorize(c *gin.Context) {
+	InitServer(c)
+	r := c.Request
+	w := c.Writer
+	store, err := session.Start(r.Context(), w, r)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	var form url.Values
+	if v, ok := store.Get("ReturnUri"); ok {
+		form = v.(url.Values)
+	}
+	r.Form = form
+
+	store.Delete("ReturnUri")
+	store.Save()
+
+	err = srv.HandleAuthorizeRequest(w, r)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": err.Error(),
 		})
 		return
 	}
@@ -132,5 +154,23 @@ func ResponseErrorHandler(re *errors.Response) {
 }
 
 func AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
-	// TODO
+	store, err := session.Start(r.Context(), w, r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var form url.Values
+	if v, ok := store.Get("ReturnUri"); ok {
+		form = v.(url.Values)
+	}
+	r.Form = form
+
+	store.Delete("ReturnUri")
+	store.Save()
+
+	err = srv.HandleAuthorizeRequest(w, r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	}
 }
